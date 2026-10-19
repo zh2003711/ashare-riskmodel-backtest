@@ -1,5 +1,4 @@
-# Excerpt from Hao Zheng's A-share quant research codebase (2026). Shared for interview review only;
-# the data, signal, alpha-model and portfolio-optimizer layers are not included.
+# Excerpt from Hao Zheng's A-share quant research codebase, shared for interview review.
 """Engine correctness against hand-computed cases."""
 
 import numpy as np
@@ -163,7 +162,7 @@ def test_lock_masks_exact_prices():
                           [110.0, 109.6, 10.5, 12.0, 11.0]], index=dates, columns=cols)
     ones = pd.DataFrame(1.0, index=dates, columns=cols)
     adj = ones.copy()
-    adj.loc[dates[1], "600300"] = 2.0  # 1:1 split on day 1: 除权参考价 = 20*1/2 = 10
+    adj.loc[dates[1], "600300"] = 2.0  # 1:1 split on day 1: reference price = 20*1/2 = 10
     st = ones * 0.0
     st["000005"] = 1.0
     m = lock_masks(close, close, close, close, adj, st, ones * 999)
@@ -172,7 +171,7 @@ def test_lock_masks_exact_prices():
         "600100": True,   # closed at the exact 110.00 limit
         "600200": False,  # +9.6% at day high, but below 110.00 minus one tick
         "000005": True,   # main-board ST 5% -> 10.50
-        "920001": False,  # 北交所 30%: +20% is an ordinary day
+        "920001": False,  # Beijing Stock Exchange 30%: +20% is an ordinary day
         "600300": True,   # ex-div reference 10 -> limit 11.00 despite raw close halving
     }
 
@@ -186,9 +185,7 @@ def test_lock_masks_down_limit():
 
 
 def test_lock_masks_half_up_rounding():
-    """The exchange rounds half-up at both steps; np.round's half-even misses sealed
-    boards. Real cases from review: 002190 2016-07-12 (ex-div ref 35.444901 -> 参考价
-    35.44 -> limit 38.98, sealed) and the 1.15 -> down limit half-up(1.035) = 1.04."""
+    """The exchange rounds half-up at both steps; np.round's half-even would miss sealed boards."""
     dates = pd.date_range("2024-01-01", periods=2, freq="B")
     cols = ["002190", "600100"]
     close = pd.DataFrame([[35.54, 1.15], [38.98, 1.04]], index=dates, columns=cols)
@@ -246,10 +243,8 @@ def test_zero_amount_blocks_trade():
 
 
 def test_pinned_regression():
-    """Full-path drift tripwire (rqalpha's result-pinning pattern): a scenario exercising
-    fee-aware entry, fee repricing, drift, a suspension-blocked rotation and a
-    budget-scaled buy, pinned to hand-verified values. A diff here means the engine's
-    semantics changed — intentional changes must re-pin AND re-verify by hand."""
+    """Full-path regression pinned to hand-verified values: fee-aware entry, drift, a blocked rotation
+    and a budget-scaled buy."""
     dates = pd.date_range("2020-01-01", periods=8, freq="B")
     ret = pd.DataFrame({"A": [0, 0, 0.10, 0, 0, 0, 0, 0.05],
                         "B": [0.0] * 5 + [-0.10, 0, 0]}, index=dates)

@@ -1,7 +1,5 @@
-# Excerpt from Hao Zheng's A-share quant research codebase (2026). Shared for interview review only;
-# the data, signal, alpha-model and portfolio-optimizer layers are not included.
-"""Risk model known answers (A5): covariance recovery on synthetic factor returns,
-suspension-aware specific variance, PSD output, daily-exposure variant."""
+# Excerpt from Hao Zheng's A-share quant research codebase, shared for interview review.
+"""Risk model tests on synthetic data with known answers."""
 
 import numpy as np
 import pandas as pd
@@ -76,7 +74,7 @@ def _daily_inputs(R):
 
 
 def test_daily_cache_matches_window_estimator():
-    # 10-04: 按交易日缓存的截面回归 + risk_from_daily 与 原窗内估计器 (同一窗、全体成员、静态行业、时变风格、逐日 alpha 残差) 风险数一致
+    # the per-day regression cache reproduces the window estimator
     R = _returns()
     ST = pd.DataFrame(RNG.normal(size=(T, N)).cumsum(axis=0) / 10, columns=SECT.index)
     A = pd.DataFrame(RNG.normal(size=(T, N)), columns=SECT.index)
@@ -104,7 +102,7 @@ def test_daily_cache_matches_window_estimator():
 
 
 def test_member_mask_keeps_non_members_out_of_the_cross_section():
-    # 前半窗 30 只不是成员且收益被污染: 逐日成员回归下因子协方差回到干净值, 今日名字套整窗则被污染 (估计窗幸存者问题的反面)
+    # non-members' contaminated returns stay out of the factor covariance
     R = _returns()
     bad = np.zeros((T, N), bool); bad[: T // 2, :30] = True
     R.values[bad] += RNG.normal(size=int(bad.sum())) * 0.5

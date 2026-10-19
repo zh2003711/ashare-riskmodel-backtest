@@ -1,18 +1,5 @@
-# Excerpt from Hao Zheng's A-share quant research codebase (2026). Shared for interview review only;
-# the data, signal, alpha-model and portfolio-optimizer layers are not included.
-"""CNE6-lite style block, for answering "is this alpha or is it a style tilt?"
-
-Eleven of CNE6's fifteen styles are buildable from what this lab holds:
-Size, MidCap, Beta, Momentum, LTReversal, ResVol, Liquidity, BP, EarningsYield,
-DividendYield, Profitability, EarningsQuality. GROWTH, INVESTMENT_QUALITY,
-LEVERAGE and EARNINGS_VARIABILITY need income-statement history and debt detail
-we never pulled -- their absence is disclosed on every report rather than
-papered over, and it matters most for fundamental candidates.
-
-`build()` returns raw daily panels; `exposures()` does the CNE6 cross-section
-work at one date -- winsorize, cap-weighted-mean-zero standardisation, and the
-orthogonalisations that make MidCap/ResVol/Liquidity mean what they are meant to.
-"""
+# Excerpt from Hao Zheng's A-share quant research codebase, shared for interview review.
+"""Twelve CNE6-style factors: raw daily panels (`build`) and per-date standardized exposures (`exposures`)."""
 
 import os
 from pathlib import Path
@@ -35,12 +22,7 @@ def _ew(df, hl, minp):
 
 def build(idx, cols, ret, cap, valid):
     """Raw (unstandardised) daily style panels aligned to (idx, cols)."""
-    # pb/dv_ttm have no 2026 refresh yet: those fall back to the 2021 panels, so
-    # BP/DivYield truncate at 2021-12 on extended grids (disclosed on reports);
-    # Liquidity/EarnYield read the 2026 panels and cover the full grid.
-    # QLAB_STYLE_PATCH (09-05 轴升级第一步): 目录里有同名面板就优先读 (pb/dv_ttm/ROE/ACC 重建到
-    # 2026, scripts/build_style_inputs_2026.py); 不设 = 行为不变 (BP/DivYield/Profit/EarnQuality
-    # 2022 起为空).
+    # QLAB_STYLE_PATCH: optional directory whose panels override the defaults
     patch = os.environ.get("QLAB_STYLE_PATCH")
 
     def ext(n):
@@ -63,8 +45,7 @@ def build(idx, cols, ret, cap, valid):
                     / np.maximum(w.sum(axis=1), 1e-9), index=idx)     # cap-weighted
     m = pd.DataFrame(np.repeat(mkt.values[:, None], len(cols), 1), index=idx, columns=cols)
 
-    # 10-03: 每张原料算完即转 float32 并释放中间帧 (原版把 ~15 张全长 float64 留到函数末尾, 峰值 ≈5.6 GB,
-    # 8 GB Mac 上任何产品臂/检验都先把机器压进交换区); 运算顺序逐项不变, 输出逐位相同.
+    # convert to float32 and free intermediates early to cap peak memory
     f32 = lambda v: np.asarray(v, dtype="float32")
     er, em = _ew(R, 63, 120), _ew(m, 63, 120)
     cov = _ew(R * m, 63, 120) - er * em
@@ -84,8 +65,7 @@ def build(idx, cols, ret, cap, valid):
     out["LTReversal"] = f32((-(lr.ewm(halflife=260, min_periods=500).mean().shift(273) * 1040)).values)
     out["_DASTD"] = f32(R.ewm(halflife=42, min_periods=120).std().values)
     del R
-    # CMRA by running max/min over the 12 trailing monthly cumulations -- the
-    # stack-and-concat form of this is a 1.4GB frame and will not fit here.
+    # CMRA: running max / min over 12 trailing monthly cumulative returns
     csum = lr.rolling(21, min_periods=12).sum().astype("float32")
     del lr
     run = np.zeros(csum.shape, dtype="float32")
@@ -158,12 +138,7 @@ def exposures(raw, p, sel, cap):
 
 
 def style_panel(raw, name, ps, pool, cap, shape):
-    """Materialise one standardised style as a (T, S) panel on the rebalance rows.
-
-    Derived styles (MidCap / ResVol / Liquidity) exist only after the
-    cross-sectional orthogonalisation, so they cannot be read out of `raw` --
-    this is the only correct way to use one as a double-sort control.
-    """
+    """One standardized style as a (T, S) panel on the rebalance rows."""
     out = np.full(shape, np.nan, dtype="float32")
     for i, p in enumerate(ps):
         sel = pool[i]

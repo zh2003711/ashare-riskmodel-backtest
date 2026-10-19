@@ -1,29 +1,8 @@
-# Excerpt from Hao Zheng's A-share quant research codebase (2026). Shared for interview review only;
-# the data, signal, alpha-model and portfolio-optimizer layers are not included.
-"""Daily portfolio backtest engine with A-share trading constraints.
+# Excerpt from Hao Zheng's A-share quant research codebase, shared for interview review.
+"""A-share daily backtest engine.
 
-Timing: target weights set at close of signal day s (from data through s),
-trades execute on s+1 at the chosen price (execution = "close" | "open" | "vwap"),
-returns accrue from s+1 onward. Day t is booked in two legs around the fill:
-leg A close_{t-1} -> p_exec (drift, then the trade), leg B p_exec -> close_t; with
-"close" leg B is empty and the arithmetic is the classic single-leg book. Cash earns
-zero. Declared fees split into commission (both sides, = buy_bps) and taxes (stamp on
-sells = sell_bps - buy_bps with the 2023-08-28 halving; 过户费 `transfer_bps` both
-sides, halved 2022-04-29); the surface-priced execution items split into half-spread
-and impact. An optional dividend-yield panel levies 红利税 on ex-dates by holding age
-(<= 21 bars 20%, <= 244 bars 10%, else 0 — the holding period AT the ex-date, an
-approximation of the sale-time rule). The book stays fully-funded (no leverage): buys can
-only spend cash on hand plus the proceeds of that day's executed sells, so when sells are blocked
-(suspension / limit-lock) the buys are scaled down and retry next rebalance —
-weights may sum below 1 (remainder in cash) but never above.
-
-Constraints: cannot buy suspended or limit-up-locked names, cannot sell
-suspended or limit-down-locked names; blocked trades retry at the next
-rebalance. A suspended holding stays frozen and books its full resume
-repricing via ret. A name with no price for DELIST_DAYS straight AND no
-price ever again in the panel (delisting as an ex-post data fact, not a
-tradable signal) is written off cost-free at its frozen value — generous
-(real delistings recover far less), noted alongside the survivorship caveat.
+Weights set at the close of day s fill on s+1 at the close, open or VWAP. Suspended and
+limit-locked names cannot trade; costs split into commission, taxes, spread and impact.
 """
 
 from dataclasses import dataclass
@@ -37,20 +16,17 @@ from qlab.data.panel import Panel
 LIMIT = 0.095   # main-board locked-limit threshold
 LIMIT_20 = 0.195   # STAR (688) since listing; ChiNext (300) from 2020-08-24
 LIMIT_ST = 0.045   # main-board ST names
-LIMIT_BJ = 0.295   # 北交所 (920)
+LIMIT_BJ = 0.295   # Beijing Stock Exchange (920)
 CHINEXT_20 = pd.Timestamp("2020-08-24")
-MAINBOARD_REG = pd.Timestamp("2023-04-10")  # 注册制主板: new listings limit-free 5 bars
+MAINBOARD_REG = pd.Timestamp("2023-04-10")  # registration-based main board: new listings limit-free for 5 bars
 STAMP_HALVED = pd.Timestamp("2023-08-28")  # stamp duty 0.1% -> 0.05% (sell_bps includes 10bp)
-TRANSFER_HALVED = pd.Timestamp("2022-04-29")  # 过户费 0.02‰ -> 0.01‰, both sides
-DIV_TAX = ((21, 0.20), (244, 0.10))  # holding bars -> 红利税 rate; longer = 0
+TRANSFER_HALVED = pd.Timestamp("2022-04-29")  # transfer fee 0.02‰ -> 0.01‰, both sides
+DIV_TAX = ((21, 0.20), (244, 0.10))  # holding bars -> dividend tax rate; longer = 0
 TICK = 0.01   # A-share stock tick; limit prices round to it
 
 
 def _limit_panel(panel: Panel) -> pd.DataFrame:
-    """Per-cell locked-limit threshold by board and date. 688 = 20% always; 300 = 10% before
-    2020-08-24, 20% after; 920 = 30%; main-board ST = 5%; everything else 10%.
-    Inference-path only (panels without raw prices): thresholds sit half a limit-step
-    inside the exact ratio."""
+    """Limit-lock thresholds by board and date, for panels without raw prices."""
     cols = panel.close.columns
     base = np.where([c.startswith(("688", "689")) for c in cols], LIMIT_20,
                     np.where([c.startswith("920") for c in cols], LIMIT_BJ, LIMIT))
@@ -67,23 +43,7 @@ DELIST_DAYS = 20  # no-price grace before a name that never trades again is writ
 def lock_masks(raw_close: pd.DataFrame, raw_open: pd.DataFrame, raw_high: pd.DataFrame,
                raw_low: pd.DataFrame, adj_factor: pd.DataFrame, st: pd.DataFrame,
                days_listed: pd.DataFrame) -> dict[str, pd.DataFrame]:
-    """Exact exchange limit-lock masks from RAW prices (panel-build time; trade_masks
-    consumes them via Panel.lock_*). Reference price = prev adjusted close de-adjusted
-    at today's factor — the exchange's 除权除息参考价 on ex-days — rounded half-up to
-    the 0.01 tick, then the limit price rounds half-up again (exchange arithmetic at
-    both steps; np.round's half-even misses sealed boards on .005 boundaries). Locked =
-    closed (or, for the *_open masks, opened and never traded off) at/through the limit
-    with one-tick float tolerance (rqalpha price_limits convention).
-
-    Ratio schedule: 688/689 20%; 300/301/302 10% -> 20% from 2020-08-24; 920 (北交所)
-    30%; main-board ST 5%; else 10%. No-limit windows -> NaN limit -> never locked:
-    the first bar of any listing (ref is NaN; the pre-2023 main-board first-day 44%/36%
-    caps are NOT enforced — the 180d universe filter covers factor pipelines), plus
-    bars 1-5 on STAR always / ChiNext from 2020-08-24 / registration-reform main board
-    from 2023-04-10 (days_listed <= 12 guards panel truncation from faking a new
-    listing; a listing straddling a long holiday loses the tail of its window —
-    conservative). A suspension crossing the panel start has no in-window reference
-    price: its resume bar stays unlocked (same miss as the inference path)."""
+    """Exact limit-lock masks from raw prices: exchange reference price, limits rounded half-up to the tick."""
     idx, cols = raw_close.index, raw_close.columns
     star = np.array([c.startswith(("688", "689")) for c in cols])
     chinext = np.array([c.startswith(("300", "301", "302")) for c in cols])
@@ -119,14 +79,13 @@ class BacktestResult:
     cost: pd.Series  # fraction of NAV paid on each execution day
     turnover: pd.Series  # one-way, fraction of NAV, on execution days
     n_holdings: pd.Series
-    # aum-mode diagnostics (None in classic mode) — 7th review: a capacity curve without
-    # fill/carry/cash/participation evidence is just a cost curve
+    # executable-ledger diagnostics (None in classic mode)
     fill: pd.Series | None = None        # |executed| / |desired| on execution days
     aim_gap: pd.Series | None = None     # |aim - h| after trading (unworked residual)
     cash: pd.Series | None = None        # 1 - sum(h) (cash drag from capped fills)
     impact_cost: pd.Series | None = None  # spread + sqrt-law impact (declared = cost - this)
     part_max: pd.Series | None = None    # max single-name participation that day
-    # four-way cost split (B2, 2026-09-05): cost == fee + tax + spread + impact every day
+    # cost split: cost == fee + tax + spread + impact
     cost_fee: pd.Series | None = None     # commission, both sides (= buy_bps)
     cost_tax: pd.Series | None = None     # stamp (sells) + transfer (both) + dividend tax
     cost_spread: pd.Series | None = None  # half-spread on executed notional (surface grid)
@@ -134,18 +93,15 @@ class BacktestResult:
 
 
 def trade_masks(panel: Panel, execution: str = "close") -> tuple[pd.DataFrame, pd.DataFrame]:
-    # amount > 0: a bar nobody traded is not a fill opportunity (rqalpha inactive_limit)
+    # no turnover = no fill opportunity
     ok = panel.close.notna() & (panel.suspended == 0) & (panel.amount > 0)
-    if panel.lock_up is not None:  # exact masks from raw prices (t9-built panels)
+    if panel.lock_up is not None:  # exact masks from raw prices
         if execution == "open":
             return ok & ~panel.lock_up_open, ok & ~panel.lock_dn_open
         return ok & ~panel.lock_up, ok & ~panel.lock_dn   # close and vwap: sealed at the close
     lim = _limit_panel(panel)
     if execution == "open":
-        # OHLC approximation of an open-locked one-字板: open pinned at the limit vs the
-        # last known close and the name never traded off it intraday (low never below the
-        # up-limit / high never above the down-limit). A board that unseals after the open
-        # counts as tradable even if it reseals later — resealing is invisible in OHLC.
+        # open-locked: opened at the limit and never traded off it (OHLC approximation)
         prev = panel.close.ffill().shift(1)
         up_locked = (panel.open >= prev * (1 + lim)) & (panel.low >= panel.open * 0.9999)
         dn_locked = (panel.open <= prev * (1 - lim)) & (panel.high <= panel.open * 1.0001)
@@ -157,10 +113,8 @@ def trade_masks(panel: Panel, execution: str = "close") -> tuple[pd.DataFrame, p
 
 def execute_day(h, aim, buyable_row, sellable_row, buy_bps: float, sell_bps: float,
                 cap=None):
-    """One day's fills toward `aim` under A-share constraints — the SINGLE execution
-    semantic shared by the backtest loop and the live ledger. Fees leave the cash pool:
-    the buy budget nets the sell fee and buys pay their own fee (no fee-blind overdraft).
-    Returns (delta, bought, sold, cost_frac)."""
+    """One day's fills toward `aim`; buys are limited to cash plus sale proceeds, net of fees.
+    Returns (delta, bought, sold, cost)."""
     delta = aim - h
     delta[(delta > 0) & ~buyable_row] = 0.0
     delta[(delta < 0) & ~sellable_row] = 0.0
@@ -179,9 +133,7 @@ def execute_day(h, aim, buyable_row, sellable_row, buy_bps: float, sell_bps: flo
 
 
 def exec_leg(panel: Panel, execution: str) -> np.ndarray:
-    """q = close / p_exec - 1 per (date, symbol): the return the traded notional earns
-    between the fill and the close (leg B). Zero for close execution and wherever the
-    fill price is missing (no fill happens there anyway)."""
+    """Return from the fill price to the close; zero for close execution."""
     if execution == "close":
         return np.zeros(panel.ret.shape)
     px = panel.open if execution == "open" else panel.vwap
@@ -193,35 +145,17 @@ def run(target: pd.DataFrame, panel: Panel, costs: CostCfg,
         impact_c: float | np.ndarray = 1.0,
         spread_half: np.ndarray | None = None, execution: str = "close",
         div_yield: pd.DataFrame | None = None) -> BacktestResult:
-    """target: weight rows on signal dates only (all-NaN rows elsewhere); signal
-    dates must be panel trading days and columns panel symbols.
+    """Backtest `target` (weights on signal dates only) on `panel`.
 
-    execution: "close" (classic, bit-for-bit the single-leg book) | "open" | "vwap" —
-    the fill price on s+1; masks follow (open-locked boards for "open", close-sealed
-    boards for "vwap"). div_yield: dates x symbols cash-dividend yield on ex-dates
-    (cash_div / prev raw close, NaN elsewhere) -> 红利税 by holding age.
-
-    aum=None reproduces the classic single-fill book bit-for-bit. With aum set (CNY), the
-    book becomes an EXECUTABLE ledger: each day's per-name trade is capped at
-    participation x that day's 20d-ADV / aum, the unfilled remainder keeps working toward
-    the standing aim on subsequent days, and a square-root impact cost
-    (impact_c x sigma20 x sqrt(participation), linear beyond one full ADV) is charged on
-    EXECUTED trades — on top of the asymmetric linear bps. Names with no ADV are
-    untradable that day rather than free to fill.
-
-    impact_c accepts a (n_dates, n_sym) grid instead of a scalar: that is the measured
-    k surface (qlab.costsurface). spread_half likewise takes a (n_dates, n_sym) grid of
-    one-way effective half-spreads (fraction, not bps) charged on executed trades — use
-    it together with a CostCfg reduced to the declared fee schedule (commission + stamp),
-    which is the cost-calib accounting identity 全口径 = 实测执行项 + 声明费用表.
-    NaN in either grid falls back to the scalar/zero default for that cell, so partial
-    calibration coverage degrades gracefully instead of voiding the day."""
+    execution: fill price on s+1 ("close" | "open" | "vwap"). With `aum` set, each name's daily
+    trade is capped at `participation` x 20-day ADV and pays spread plus square-root impact;
+    `div_yield` adds dividend tax by holding period."""
     dates = panel.ret.index
     bad_syms = target.columns.difference(panel.ret.columns)
     bad_dates = target.index[target.notna().any(axis=1)].difference(dates)
     if len(bad_syms) or len(bad_dates):
         raise ValueError(
-            f"target does not line up with the panel (was silently dropped before): "
+            f"target does not line up with the panel: "
             f"{len(bad_syms)} unknown symbols {list(bad_syms[:3])}, {len(bad_dates)} "
             f"signal dates off the trading calendar {list(bad_dates[:3])}"
         )
@@ -234,8 +168,7 @@ def run(target: pd.DataFrame, panel: Panel, costs: CostCfg,
           if div_yield is not None else None)
     tgt = target.reindex(index=dates, columns=panel.ret.columns).to_numpy()
     is_signal = ~np.isnan(tgt).all(axis=1)
-    # dead = no price for DELIST_DAYS straight and none ever again in the panel;
-    # a long suspension has a future price, stays frozen, and books the resume gap via ret
+    # delisted = no price for DELIST_DAYS and none afterwards; long suspensions stay frozen
     dead = (
         (panel.close.isna().rolling(DELIST_DAYS, min_periods=DELIST_DAYS).sum()
          == DELIST_DAYS)
@@ -253,10 +186,7 @@ def run(target: pd.DataFrame, panel: Panel, costs: CostCfg,
     n_hold = np.zeros(n_dates)
     c_fee, c_tax, c_spr, c_imp = (np.zeros(n_dates) for _ in range(4))
     if aum is not None:
-        # min_periods=1: an ADV estimate from any observed history beats declaring the name
-        # untradable through the warmup (NaN ADV still -> cap 0 for never-traded names).
-        # shift(1): sizing today's participation may only use YESTERDAY's ADV/vol — the
-        # unshifted window contained execution-day information (7th review).
+        # ADV and volatility from data up to yesterday
         adv_np = panel.amount.rolling(20, min_periods=1).mean().shift(1).to_numpy()
         sig_np = panel.ret.rolling(20, min_periods=5).std().shift(1).to_numpy()
         fill = np.full(n_dates, np.nan)
@@ -267,7 +197,7 @@ def run(target: pd.DataFrame, panel: Panel, costs: CostCfg,
     aim = None
 
     for t in range(n_dates):
-        if dy is not None:                        # 红利税 on ex-dates, by holding age
+        if dy is not None:                        # dividend tax on ex-dates, by holding age
             rate = np.select([age <= DIV_TAX[0][0], age <= DIV_TAX[1][0]],
                              [DIV_TAX[0][1], DIV_TAX[1][1]], 0.0)
             tax = np.where(h > 1e-8, h * dy[t] * rate, 0.0)
@@ -301,7 +231,7 @@ def run(target: pd.DataFrame, panel: Panel, costs: CostCfg,
                 ex = np.abs(delta)
                 part = np.where(adv_np[t] > 0, ex * aum / adv_np[t], 0.0)
                 kc = impact_c[t] if isinstance(impact_c, np.ndarray) else impact_c
-                kc = np.where(np.isfinite(kc), kc, 1.0)   # 未标定格回落到标量默认
+                kc = np.where(np.isfinite(kc), kc, 1.0)   # uncalibrated cells fall back to the scalar
                 impact = (kc * np.nan_to_num(sig_np[t])
                           * np.sqrt(np.minimum(part, 1.0)) * np.maximum(part, 1.0))
                 c_imp[t] = float((ex * impact).sum())

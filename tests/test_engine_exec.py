@@ -1,6 +1,5 @@
-# Excerpt from Hao Zheng's A-share quant research codebase (2026). Shared for interview review only;
-# the data, signal, alpha-model and portfolio-optimizer layers are not included.
-"""Execution modes, four-way cost split, transfer fee and dividend tax (B1/B2)."""
+# Excerpt from Hao Zheng's A-share quant research codebase, shared for interview review.
+"""Execution prices, cost split, transfer fee and dividend tax."""
 
 import numpy as np
 import pandas as pd
